@@ -2,6 +2,7 @@ import os
 import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update, Bot
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Google Libraries
@@ -19,70 +20,106 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 
 app = FastAPI()
 
-# 2. Helper Function: Talk to Google
-def add_task_to_google(task_title):
-    """
-    Connects to Google using the Refresh Token and adds a task.
-    This runs synchronously, so we will wrap it later.
-    """
+# --- GOOGLE HELPERS ---
+
+def get_google_service():
+    """Authenticates and returns the Google Tasks service."""
     if not GOOGLE_REFRESH_TOKEN:
-        return "Error: Google Login details missing on Vercel."
+        return None
+    
+    creds = Credentials(
+        None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET
+    )
+    return build('tasks', 'v1', credentials=creds)
 
+def add_task_to_google(task_title):
     try:
-        # Reconstruct the credentials using the Refresh Token
-        creds = Credentials(
-            None, # No access token initially (it will fetch one automatically)
-            refresh_token=GOOGLE_REFRESH_TOKEN,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=GOOGLE_CLIENT_ID,
-            client_secret=GOOGLE_CLIENT_SECRET
-        )
+        service = get_google_service()
+        if not service:
+            return "Error: Google Login details missing."
 
-        # Build the service
-        service = build('tasks', 'v1', credentials=creds)
-
-        # Create the task in the default list
         result = service.tasks().insert(
             tasklist='@default',
             body={'title': task_title}
         ).execute()
 
-        return f"✅ Task added: {result['title']}"
+        return f"✅ *Task added:* {result['title']}"
     except Exception as e:
         print(f"Google Error: {e}")
-        return f"❌ Failed to add task. Error: {str(e)}"
+        return f"❌ Failed to add task."
 
-# 3. Bot Commands
+def get_pending_tasks_from_google():
+    """Fetches all incomplete tasks."""
+    try:
+        service = get_google_service()
+        if not service:
+            return "Error: Google Login details missing."
+
+        # 'showCompleted=False' hides tasks you've already checked off
+        results = service.tasks().list(
+            tasklist='@default', 
+            showCompleted=False,
+            showHidden=False
+        ).execute()
+        
+        items = results.get('items', [])
+
+        if not items:
+            return "You have no pending tasks! 🎉"
+
+        # Format the list nicely
+        message = "📝 *Your Pending Tasks:*\n"
+        for task in items:
+            # We use a bullet point for each task
+            message += f"• {task['title']}\n"
+        
+        return message
+
+    except Exception as e:
+        print(f"Google Error: {e}")
+        return f"❌ Failed to get tasks."
+
+# --- BOT COMMANDS ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Hello! I am ready.\n\n"
         f"Your ID: `{update.effective_chat.id}`\n"
-        f"Try: /todo Buy milk"
+        f"Try:\n"
+        f"/todo Buy milk\n"
+        f"/show",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 async def todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Get the text after the command (e.g. "Buy milk")
     task_text = " ".join(context.args)
-    
     if not task_text:
-        await update.message.reply_text("Please type a task. Example: /todo Buy milk")
+        await update.message.reply_text("Please type a task. Example: `/todo Buy milk`", parse_mode=ParseMode.MARKDOWN)
         return
 
     await update.message.reply_text("⏳ Adding to Google Tasks...")
-
-    # 2. Run the Google code in a separate thread (so we don't block the bot)
-    # This is important because the Google library is "blocking"
     response_text = await asyncio.to_thread(add_task_to_google, task_text)
+    await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN)
 
-    # 3. Reply with result
-    await update.message.reply_text(response_text)
+async def show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Fetching your list...")
+    # Run the blocking Google code in a separate thread
+    response_text = await asyncio.to_thread(get_pending_tasks_from_google)
+    await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN)
 
-# 4. Setup Bot
+# --- SETUP ---
+
 bot_app = ApplicationBuilder().token(TOKEN).build()
 bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("todo", todo)) # <--- New Command
+bot_app.add_handler(CommandHandler("todo", todo))
+bot_app.add_handler(CommandHandler("show", show)) # <--- New Handler
 
-# 5. Webhook & Cron
+# --- WEBHOOK & CRON ---
+
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     if not TOKEN:
@@ -103,6 +140,18 @@ async def scheduled_message():
     if not TARGET_CHAT_ID:
         return {"error": "Target Chat ID not set"}
     
+    # 1. Fetch the tasks first
+    task_list_text = await asyncio.to_thread(get_pending_tasks_from_google)
+    
+    # 2. Build the final morning message
+    morning_text = f"🌞 *Good morning!*\n\n{task_list_text}"
+
+    # 3. Send it
     bot = Bot(token=TOKEN)
-    await bot.send_message(chat_id=TARGET_CHAT_ID, text="🌞 Good morning! Don't forget to check your /todo list.")
+    await bot.send_message(
+        chat_id=TARGET_CHAT_ID, 
+        text=morning_text, 
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
     return {"status": "sent"}
