@@ -3,7 +3,7 @@ import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 # Google Libraries
 from google.oauth2.credentials import Credentials
@@ -69,7 +69,7 @@ def delete_task_by_index(index):
             return "❌ Task not found (list might have changed)."
         
         task_to_delete = tasks[index]
-        
+
         # 2. Delete using the ID found
         service.tasks().delete(tasklist='@default', task=task_to_delete['id']).execute()
         return f"🗑️ Deleted: *{task_to_delete['title']}*"
@@ -150,6 +150,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 bot_app = ApplicationBuilder().token(TOKEN).build()
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CommandHandler("todo", todo))
+# This captures any text that is NOT a command
+bot_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), todo))
 bot_app.add_handler(CommandHandler("show", show))
 bot_app.add_handler(CallbackQueryHandler(button_callback)) # <--- Handles the buttons
 
