@@ -35,7 +35,6 @@ def get_google_service():
     return build('tasks', 'v1', credentials=creds)
 
 def get_raw_tasks():
-    """Fetches the raw list of tasks (objects) from Google."""
     service = get_google_service()
     if not service: return []
     
@@ -56,21 +55,14 @@ def add_task_to_google(task_title):
         return f"❌ Error: {str(e)}"
 
 def delete_task_by_index(index):
-    """
-    Since IDs are too long for buttons, we fetch the list again
-    and delete the item at the specific index (0, 1, 2...).
-    """
     try:
         service = get_google_service()
-        # 1. Get fresh list to ensure index is accurate
         tasks = get_raw_tasks()
         
         if index >= len(tasks):
             return "❌ Task not found (list might have changed)."
         
         task_to_delete = tasks[index]
-
-        # 2. Delete using the ID found
         service.tasks().delete(tasklist='@default', task=task_to_delete['id']).execute()
         return f"🗑️ Deleted: *{task_to_delete['title']}*"
     except Exception as e:
@@ -81,12 +73,12 @@ def delete_task_by_index(index):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Hello! Your ID: `{update.effective_chat.id}`\n\n"
-        f"Commands:\n"
-        f"/todo <text> - Add a task\n"
-        f"/show - Manage your tasks",
+        f"1. Type `/todo <task>` OR just type the task text directly.\n"
+        f"2. Use `/show` to manage tasks.",
         parse_mode=ParseMode.MARKDOWN
     )
 
+# 1. The Explicit Command (/todo Buy Milk)
 async def todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_text = " ".join(context.args)
     if not task_text:
@@ -97,63 +89,57 @@ async def todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response_text = await asyncio.to_thread(add_task_to_google, task_text)
     await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN)
 
+# 2. The Implicit Handler (Buy Milk)
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    task_text = update.message.text
+    
+    # Optional: Ignore very short messages like "Hi" to avoid accidental tasks
+    # if len(task_text) < 3: return 
+
+    await update.message.reply_text("⏳ Adding...")
+    response_text = await asyncio.to_thread(add_task_to_google, task_text)
+    await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN)
+
 async def show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Fetching list...")
-    
-    # Fetch tasks
     tasks = await asyncio.to_thread(get_raw_tasks)
     
     if not tasks:
         await update.message.reply_text("🎉 You have no pending tasks!")
         return
 
-    # Build the message and the buttons
     message_text = "📝 *Your To-Do List:*\n\n"
     keyboard = []
 
     for i, task in enumerate(tasks):
-        # Add text line
         message_text += f"{i+1}. {task['title']}\n"
-        
-        # Add a delete button for this specific index
-        # We pass "del_0", "del_1" etc. as hidden data
         btn = InlineKeyboardButton(f"❌ Delete #{i+1}", callback_data=f"del_{i}")
         keyboard.append([btn])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the button click."""
     query = update.callback_query
-    await query.answer() # Stop the loading animation on the button
+    await query.answer()
 
     data = query.data
     if data.startswith("del_"):
-        # Extract the index number (e.g. "del_0" -> 0)
         index = int(data.split("_")[1])
-        
         await query.edit_message_text(f"⏳ Deleting task #{index+1}...")
-        
-        # Perform deletion
         result_text = await asyncio.to_thread(delete_task_by_index, index)
-        
-        # Send confirmation (or you could re-show the list)
         await context.bot.send_message(chat_id=query.message.chat_id, text=result_text, parse_mode=ParseMode.MARKDOWN)
-        
-        # Optional: Show the updated list automatically
-        # await show(update, context) 
 
 # --- SETUP ---
 
 bot_app = ApplicationBuilder().token(TOKEN).build()
 bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("todo", todo))
-# This captures any text that is NOT a command
-bot_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), todo))
+bot_app.add_handler(CommandHandler("todo", todo)) # <--- Restored this
 bot_app.add_handler(CommandHandler("show", show))
-bot_app.add_handler(CallbackQueryHandler(button_callback)) # <--- Handles the buttons
+bot_app.add_handler(CallbackQueryHandler(button_callback))
+
+# Catches text that is NOT a command
+bot_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text_message))
 
 # --- WEBHOOK & CRON ---
 
@@ -174,13 +160,11 @@ async def telegram_webhook(request: Request):
 async def scheduled_message():
     if not TARGET_CHAT_ID: return {"error": "Target Chat ID not set"}
     
-    # Fetch tasks for the morning message
     tasks = await asyncio.to_thread(get_raw_tasks)
     
     if not tasks:
         msg = "🌞 *Good morning!* You have no tasks for today. Enjoy! 🎉"
     else:
-        # Format the list nicely for text only
         task_list = "\n".join([f"• {t['title']}" for t in tasks])
         msg = f"🌞 *Good morning!* Here are your tasks:\n\n{task_list}"
 
